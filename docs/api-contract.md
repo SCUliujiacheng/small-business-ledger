@@ -1,6 +1,6 @@
 # v1 接口约定
 
-JSON UTF-8。金额入参字符串，金额返回字段 `*_cents` 均整数。所有写操作请求头 `X-Ledger-Request: 1`，Content-Type application/json。错误 `{"detail":"中文说明"}`，输入错误 422、找不到 404、冲突 409；FastAPI 验证错误 detail 也可能是数组。分页不做；硬限数据库业务和流水合计 10,000 条，达到上限拒绝新建，UI 提示导出归档。返回列表按 date desc、id desc。
+JSON UTF-8。金额入参字符串，金额返回字段 `*_cents` 均整数。所有写操作请求头 `X-Ledger-Request: 1`，Content-Type application/json。错误 `{"detail":"中文说明"}`，输入错误 422、找不到 404、冲突 409。分页不做；硬限数据库业务和流水合计 10,000 条，达到上限拒绝新建，UI 提示导出归档。返回列表按 date desc、id desc。普通请求 10 MiB、恢复请求 128 MiB 上限。
 
 ## 单据
 
@@ -32,9 +32,9 @@ start/end 必填，最多 366 天，均包含边界；monthly 只统计筛选范
 GET /api/meta -> `{name:"小本账",currency:"CNY",demo:boolean,entry_count,payment_count}` (counts包含作废)。
 POST /api/demo `{}` -> `{ok:true}`，仅允许完全空库，生成当前本地月份虚构数据，meta.demo 持久化 true。
 
-## 数据搬迁（根代理实现）
+## 导入、导出与恢复
 
-GET /api/export/entries.csv：UTF-8 BOM, columns `external_id,kind,date,description,category,quantity,unit_price,unit_cost,amount,note,status`。无external_id生成 `entry-{uuid}` 保证重导不重复。包含作废并标status，导入明确拒绝status=void。文本公式转义为前置单引号，导入只还原本工具转义前缀。
+GET /api/export/entries.csv：UTF-8 BOM, columns `external_id,kind,date,description,category,quantity,unit_price,unit_cost,amount,note,status,text_encoding`。无external_id生成 `entry-{uuid}` 保证重导不重复。包含作废并标status，导入明确拒绝status=void。text_encoding=apostrophe-v1 标记本工具的公式防护格式：以公式符号或单引号起头的文本前置单引号；只有此标记存在时还原。手写/外部CSV无标记则原样保留单引号。
 GET /api/export/payments.csv：仅供查看（不能导回），全流水包括状态，文本公式防护。
 GET /api/import/template.csv：以上销售/费用导入表头和两行虚构模板，不含status也接受。
 POST /api/import/preview `{csv_text}` -> `{rows:EntryInput[],count,errors:[{row,message}]}`；不写库。最多2,000行、2MiB。external_id 必填，文件内/已有库重复是错误。errors非空 rows=[] 防误导。
@@ -42,9 +42,9 @@ POST /api/import/commit `{csv_text}` -> `{imported:N}`；重新验证并原子�
 GET /api/backup -> `{version:1,currency:"CNY",demo,exported_at,entries:[rawEntry],payments:[rawPayment]}`；raw不含派生received/paid，可包含。
 POST /api/restore `{backup:Backup}` -> `{restored_entries:N,restored_payments:N}`，只允许完全空库，校验全部类型、id唯一、金额、关联、日期、作废状态，事务内整批恢复。保留id/created_at/voided_at/void_reason，禁止覆盖。
 
-## Python 模块边界
+## Python 模块
 
-backend owns `src/small_business_ledger/{__init__,models,store,reports,app}.py` 和 `tests/test_core.py`。`create_app(db_path: str|Path|None=None)` 创建 app，默认 env LEDGER_DB_PATH 或 ./data/ledger.db；app.state.store 是 Store。
+`models.py` 验证输入，`store.py` 处理事务，`reports.py` 计算报表，`transfer.py` 导入与备份，`app.py` 提供 HTTP 接口。`create_app(db_path: str|Path|None=None)` 创建 app，默认 env LEDGER_DB_PATH 或 ./data/ledger.db；app.state.store 是 Store。
 Store(path)，方法 entries(), payments(), create_entry(payload), create_payment(payload), void_entry(id,reason), void_payment(id,reason), summary(start,end), meta(), seed_demo() 返回上述dict；`connect()` contextmanager 提供 sqlite3 Connection，启用 FK、busy_timeout，row_factory。
-store 模块提供 `LedgerError(detail,status_code=422)`。create_* 接收 dict 入参。迁移模块可以在 `with store.connect() as conn:` 内 `BEGIN IMMEDIATE`，直接写现有表但须依赖 models 验证。SQL 表使用 Entry/Payment 原始字段命名，日期timestampsTEXT，amountcentsINTEGER，kind等TEXT；metadata(key TEXT PRIMARY KEY,value TEXT)。后端代理尽早报告schema和验证函数接口。
-app 在工厂中 `from .transfer import router` 并 include_router，transfer由根代理提供；暂时文件未就位时开发测试可不加载但交付必须加载。生产静态资源从项目 frontend/dist 提供，安全路径，未知 /api 返回404不是SPA。使用loopback Host 白名单、Origin/Sec-Fetch-Site校验、自定义header及JSON content-type写操作约束，body size 10MiB，安全响应头。Vite proxy 127.0.0.1:8000 changeOrigin，开发Origin127.0.0.1:5173/localhost:5173 仅 LEDGER_DEV=1允许。
+store 模块提供 `LedgerError(detail,status_code=422)`。create_* 接收 dict 入参。迁移模块在 `with store.connect() as conn:` 内 `BEGIN IMMEDIATE`，使用 models 验证并在同一事务提交。SQL 表使用 Entry/Payment 原始字段命名；日期时间为 TEXT，整数分为 INTEGER；metadata(key TEXT PRIMARY KEY,value TEXT)。
+生产静态资源从项目 frontend/dist 提供，未知 /api 返回404而不是前端首页。使用 loopback Host 白名单、Origin/Sec-Fetch-Site 校验、自定义请求头和 JSON content-type 写操作约束。普通请求限制10MiB，恢复请求128MiB。Vite proxy 127.0.0.1:8000 changeOrigin；开发 Origin 127.0.0.1:5173/localhost:5173 仅 LEDGER_DEV=1 时允许。
