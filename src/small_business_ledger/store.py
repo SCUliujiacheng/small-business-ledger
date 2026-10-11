@@ -6,8 +6,18 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from .models import MAX_RECORDS, ValidationError, validate_entry, validate_payment, validate_text
+from .migrations import SCHEMA_VERSION, migrate
+from .models import (
+    MAX_RECORDS,
+    ValidationError,
+    payload_digest,
+    validate_entry,
+    validate_payment,
+    validate_text,
+    validate_uuid,
+)
 from .reports import summarize
+from .snapshots import Snapshots
 
 
 class LedgerError(ValueError):
@@ -25,7 +35,11 @@ class Store:
     def __init__(self, path):
         self.path = str(Path(path).resolve())
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.snapshots = Snapshots(self.path)
         with self.connect() as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version not in {0, 1, SCHEMA_VERSION}:
+                raise LedgerError("数据库版本高于或不兼容当前程序，请使用匹配的版本打开", 409)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS entries (
@@ -50,6 +64,86 @@ class Store:
                 CREATE INDEX IF NOT EXISTS payments_entry_idx ON payments(entry_id, kind);
                 CREATE INDEX IF NOT EXISTS payments_date_idx ON payments(date);
             """)
+            try:
+                migrate(conn, self.before_write)
+            except ValueError as exc:
+                if isinstance(exc, LedgerError):
+                    raise
+                raise LedgerError(str(exc), 409) from exc
+
+    def before_write(self, conn):
+        if not conn.in_transaction:
+            raise RuntimeError("before_write requires an active transaction")
+        count = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM payments)"
+        ).fetchone()[0]
+        if count:
+            self._snapshot(conn)
+
+    def _snapshot(self, conn):
+        try:
+            return self.snapshots.create(conn)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            raise LedgerError(
+                "自动备份失败，账目未修改。请检查备份目录权限和剩余磁盘空间。", 503
+            ) from exc
+
+    def local_backups(self):
+        try:
+            return self.snapshots.list()
+        except (OSError, ValueError) as exc:
+            raise LedgerError("无法读取本机备份目录，请检查路径和权限。", 503) from exc
+
+    def snapshot_now(self):
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self._snapshot(conn)
+
+    def read_snapshot(self, filename):
+        try:
+            return self.snapshots.read(filename)
+        except FileNotFoundError as exc:
+            raise LedgerError("未找到该备份", 404) from exc
+        except (OSError, ValueError) as exc:
+            raise LedgerError("备份文件无法读取或校验失败，请选择其他备份。", 422) from exc
+
+    def write(self, operation, payload, request_id, action):
+        try:
+            key = validate_uuid(request_id, "请求编号") if request_id is not None else None
+        except ValidationError as exc:
+            raise LedgerError(str(exc)) from exc
+        digest = payload_digest(payload)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if key is not None:
+                saved = conn.execute("SELECT * FROM write_requests WHERE key=?", (key,)).fetchone()
+                if saved:
+                    if saved["operation"] != operation or saved["payload_hash"] != digest:
+                        raise LedgerError(
+                            "该请求编号已用于不同内容，请先核对账本，勿重复录入。", 409
+                        )
+                    if operation == "entry.create":
+                        return self._entry(conn, saved["record_id"])
+                    row = conn.execute(
+                        "SELECT * FROM payments WHERE id=?", (saved["record_id"],)
+                    ).fetchone()
+                    if row is None:
+                        raise LedgerError("请求记录与账本不一致，请先检查备份。", 409)
+                    return dict(row)
+            # Reject normal business errors before rotating recovery points. The
+            # same write lock covers validation, the pre-change snapshot and insert.
+            if operation == "entry.create":
+                self._entry_constraints(conn, payload)
+            else:
+                self._payment_constraints(conn, payload)
+            self.before_write(conn)
+            result = action(conn)
+            if key is not None:
+                conn.execute(
+                    "INSERT INTO write_requests VALUES (?,?,?,?)",
+                    (key, operation, digest, result["id"]),
+                )
+            return result
 
     @contextmanager
     def connect(self):
@@ -72,7 +166,10 @@ class Store:
             "SELECT (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM payments)"
         ).fetchone()[0]
         if count >= MAX_RECORDS:
-            raise LedgerError("账本已达到 10,000 条上限，请先导出归档", 409)
+            raise LedgerError(
+                "账本已达到 10,000 条上限；导出不会释放容量，请保留备份并迁移到容量更大的工具。",
+                409,
+            )
 
     @staticmethod
     def _entry(conn, entry_id):
@@ -108,7 +205,7 @@ class Store:
     def insert_entry(self, conn, validated):
         if not conn.in_transaction:
             raise RuntimeError("insert_entry requires an active write transaction")
-        self._capacity(conn)
+        self._entry_constraints(conn, validated)
         row = {
             "id": str(uuid4()),
             **validated,
@@ -126,18 +223,26 @@ class Store:
             raise LedgerError("外部编号重复或单据约束不满足", 409) from exc
         return self._entry(conn, row["id"])
 
-    def create_entry(self, payload):
+    def _entry_constraints(self, conn, validated):
+        self._capacity(conn)
+        if (
+            validated["external_id"] is not None
+            and conn.execute(
+                "SELECT 1 FROM entries WHERE external_id=?", (validated["external_id"],)
+            ).fetchone()
+        ):
+            raise LedgerError("外部编号重复或单据约束不满足", 409)
+
+    def create_entry(self, payload, request_id=None):
         try:
             validated = validate_entry(payload)
         except ValidationError as exc:
             raise LedgerError(str(exc)) from exc
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            return self.insert_entry(conn, validated)
+        return self.write(
+            "entry.create", validated, request_id, lambda conn: self.insert_entry(conn, validated)
+        )
 
-    def insert_payment(self, conn, validated):
-        if not conn.in_transaction:
-            raise RuntimeError("insert_payment requires an active write transaction")
+    def _payment_constraints(self, conn, validated):
         self._capacity(conn)
         if validated["entry_id"] is not None:
             entry = self._entry(conn, validated["entry_id"])
@@ -160,6 +265,11 @@ class Store:
             ).fetchone()[0]
             if used + validated["amount_cents"] > entry[limit_field]:
                 raise LedgerError("本次金额超过剩余应收或应付金额", 409)
+
+    def insert_payment(self, conn, validated):
+        if not conn.in_transaction:
+            raise RuntimeError("insert_payment requires an active write transaction")
+        self._payment_constraints(conn, validated)
         row = {
             "id": str(uuid4()),
             **validated,
@@ -174,14 +284,17 @@ class Store:
         )
         return row
 
-    def create_payment(self, payload):
+    def create_payment(self, payload, request_id=None):
         try:
             validated = validate_payment(payload)
         except ValidationError as exc:
             raise LedgerError(str(exc)) from exc
-        with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            return self.insert_payment(conn, validated)
+        return self.write(
+            "payment.create",
+            validated,
+            request_id,
+            lambda conn: self.insert_payment(conn, validated),
+        )
 
     def _void(self, table, record_id, reason):
         try:
@@ -203,6 +316,7 @@ class Store:
                 ).fetchone()
             ):
                 raise LedgerError("请先作废该单据关联的有效收付款流水", 409)
+            self.before_write(conn)
             conn.execute(
                 f"UPDATE {table} SET voided_at=?,void_reason=? WHERE id=?",
                 (timestamp(), reason, record_id),
@@ -228,6 +342,18 @@ class Store:
             payments = [dict(row) for row in conn.execute("SELECT * FROM payments")]
         try:
             return summarize(entries, payments, start, end)
+        except ValidationError as exc:
+            raise LedgerError(str(exc)) from exc
+
+    def outstanding(self, as_of):
+        from .reports import outstanding
+
+        with self.connect() as conn:
+            conn.execute("BEGIN")
+            entries = [dict(row) for row in conn.execute("SELECT * FROM entries")]
+            payments = [dict(row) for row in conn.execute("SELECT * FROM payments")]
+        try:
+            return outstanding(entries, payments, as_of)
         except ValidationError as exc:
             raise LedgerError(str(exc)) from exc
 

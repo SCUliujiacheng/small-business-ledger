@@ -1,5 +1,7 @@
 """Strict input validation shared by online entry, CSV imports and restore."""
 
+import hashlib
+import json
 import re
 from datetime import date
 from uuid import UUID
@@ -12,6 +14,14 @@ PAYMENT_KINDS = {"receipt", "cost_payment", "expense_payment", "capital_in", "ca
 
 class ValidationError(ValueError):
     """User data does not satisfy the ledger's input contract."""
+
+
+def payload_digest(validated):
+    """Stable identity of the normalized create payload, shared by writes and restore."""
+    encoded = json.dumps(
+        validated, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def validate_text(value, field, min_length=0, max_length=500):
@@ -84,7 +94,19 @@ def validate_entry(payload):
     required = common | (
         {"quantity", "unit_price", "unit_cost"} if payload["kind"] == "sale" else {"amount"}
     )
-    _object(payload, required, required | {"note", "external_id"})
+    _object(
+        payload,
+        required,
+        required
+        | {
+            "note",
+            "external_id",
+            "customer",
+            "supplier",
+            "receivable_due_date",
+            "payable_due_date",
+        },
+    )
     external_id = payload.get("external_id")
     if external_id is not None:
         external_id = validate_text(external_id, "外部编号", 1, 80)
@@ -101,7 +123,20 @@ def validate_entry(payload):
         "amount_cents": 0,
         "note": validate_text(payload.get("note", ""), "备注", 0, 500),
         "external_id": external_id,
+        "customer": validate_text(payload.get("customer", ""), "客户", 0, 120),
+        "supplier": validate_text(payload.get("supplier", ""), "供应商/收款方", 0, 120),
     }
+    for field in ("receivable_due_date", "payable_due_date"):
+        due_date = payload.get(field)
+        if due_date is not None:
+            due_date = validate_date(due_date)
+            if due_date < result["date"]:
+                raise ValidationError("到期日不能早于业务日期")
+        result[field] = due_date
+    if payload["kind"] == "expense" and (
+        result["customer"] or result["receivable_due_date"] is not None
+    ):
+        raise ValidationError("费用不能填写客户或收款到期日")
     if payload["kind"] == "sale":
         quantity = payload["quantity"]
         if type(quantity) is not int or not 1 <= quantity <= 1_000_000:

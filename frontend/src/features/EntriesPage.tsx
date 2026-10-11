@@ -26,7 +26,7 @@ export function EntriesPage({
       (!start || entry.date >= start) &&
       (!end || entry.date <= end) &&
       (!normalized ||
-        `${entry.description} ${entry.category}`
+        `${entry.description} ${entry.category} ${entry.customer} ${entry.supplier} ${entry.external_id ?? ""} ${entry.note}`
           .toLocaleLowerCase()
           .includes(normalized)),
   );
@@ -47,7 +47,7 @@ export function EntriesPage({
         <Field
           label="检索项目或分类"
           type="search"
-          placeholder="搜索记录"
+          placeholder="项目、分类、往来、导入编号或备注"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -154,6 +154,28 @@ export function EntriesPage({
                           <div>
                             <dt>分类</dt>
                             <dd>{entry.category}</dd>
+                          </div>
+                          {entry.kind === "sale" ? (
+                            <>
+                              <div>
+                                <dt>客户</dt>
+                                <dd>{entry.customer || "未填写"}</dd>
+                              </div>
+                              <div>
+                                <dt>收款到期日</dt>
+                                <dd>
+                                  {entry.receivable_due_date || "未设到期日"}
+                                </dd>
+                              </div>
+                            </>
+                          ) : null}
+                          <div>
+                            <dt>供应商 / 收款方</dt>
+                            <dd>{entry.supplier || "未填写"}</dd>
+                          </div>
+                          <div>
+                            <dt>付款到期日</dt>
+                            <dd>{entry.payable_due_date || "未设到期日"}</dd>
                           </div>
                           {entry.kind === "sale" ? (
                             <>

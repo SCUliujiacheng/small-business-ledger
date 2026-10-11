@@ -3,6 +3,7 @@ import { ErrorMessage, Modal, useSubmit } from "../components/Forms";
 import { errorMessage, request } from "../lib/api";
 import { formatMoney, localDate, parseMoney, saleTotals } from "../lib/money";
 import type { ImportPreview, Meta } from "../lib/types";
+import { LocalBackupsPanel } from "./LocalBackupsPanel";
 function readFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -289,6 +290,9 @@ export function DataPage({
           ) : null}
         </section>
       </div>
+      <LocalBackupsPanel
+        revision={`${meta.entry_count}-${meta.payment_count}`}
+      />
       <section className="panel demo-panel">
         <div>
           <h2>示例账本</h2>

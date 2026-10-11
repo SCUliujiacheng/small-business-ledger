@@ -7,6 +7,10 @@ export interface Entry {
   date: string;
   description: string;
   category: string;
+  customer: string;
+  supplier: string;
+  receivable_due_date: string | null;
+  payable_due_date: string | null;
   quantity: number | null;
   unit_price_cents: number | null;
   unit_cost_cents: number | null;
@@ -70,6 +74,10 @@ export interface EntryInput {
   date: string;
   description: string;
   category: string;
+  customer?: string;
+  supplier?: string;
+  receivable_due_date?: string | null;
+  payable_due_date?: string | null;
   quantity?: number;
   unit_price?: string;
   unit_cost?: string;
@@ -81,6 +89,38 @@ export interface ImportPreview {
   rows: EntryInput[];
   count: number;
   errors: { row: number; message: string }[];
+}
+export interface OutstandingItem {
+  entry_id: string;
+  kind: "receipt" | "cost_payment" | "expense_payment";
+  date: string;
+  description: string;
+  category: string;
+  counterparty: string;
+  due_date: string | null;
+  outstanding_cents: number;
+  original_cents: number;
+  settled_cents: number;
+  overdue_days: number;
+  status: "overdue" | "due_today" | "upcoming" | "no_due_date";
+}
+export interface OutstandingReport {
+  as_of: string;
+  receivable_cents: number;
+  payable_cents: number;
+  overdue_receivable_cents: number;
+  overdue_payable_cents: number;
+  items: OutstandingItem[];
+}
+export interface LocalBackup {
+  filename: string;
+  created_at: string;
+  size_bytes: number;
+}
+export interface LocalBackups {
+  directory: string;
+  retention: number;
+  items: LocalBackup[];
 }
 export const paymentLabels: Record<PaymentKind, string> = {
   receipt: "销售收款",

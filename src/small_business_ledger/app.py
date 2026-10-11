@@ -166,8 +166,8 @@ def create_app(db_path=None):
         return {"items": app.state.store.entries()}
 
     @app.post("/api/entries", status_code=201)
-    def post_entry(payload: dict):
-        return app.state.store.create_entry(payload)
+    def post_entry(request: Request, payload: dict):
+        return app.state.store.create_entry(payload, request.headers.get("idempotency-key"))
 
     @app.post("/api/entries/{entry_id}/void")
     def void_entry(entry_id: str, payload: dict):
@@ -180,8 +180,8 @@ def create_app(db_path=None):
         return {"items": app.state.store.payments()}
 
     @app.post("/api/payments", status_code=201)
-    def post_payment(payload: dict):
-        return app.state.store.create_payment(payload)
+    def post_payment(request: Request, payload: dict):
+        return app.state.store.create_payment(payload, request.headers.get("idempotency-key"))
 
     @app.post("/api/payments/{payment_id}/void")
     def void_payment(payment_id: str, payload: dict):
@@ -192,6 +192,27 @@ def create_app(db_path=None):
     @app.get("/api/summary")
     def get_summary(start: str, end: str):
         return app.state.store.summary(start, end)
+
+    @app.get("/api/outstanding")
+    def get_outstanding(as_of: str):
+        return app.state.store.outstanding(as_of)
+
+    @app.get("/api/local-backups")
+    def get_local_backups():
+        return app.state.store.local_backups()
+
+    @app.post("/api/local-backups", status_code=201)
+    def create_local_backup(payload: dict):
+        if payload:
+            raise LedgerError("备份请求须为空对象")
+        return app.state.store.snapshot_now()
+
+    @app.get("/api/local-backups/{filename}")
+    def download_local_backup(filename: str):
+        return JSONResponse(
+            app.state.store.read_snapshot(filename),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.post("/api/demo")
     def demo(payload: dict):

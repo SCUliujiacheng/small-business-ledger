@@ -6,6 +6,7 @@ permissions:
   contents: read
 jobs:
   windows-launcher:
+    name: Windows launcher and daily-use safety
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -17,6 +18,11 @@ jobs:
           $launcherPath = Join-Path $env:GITHUB_WORKSPACE 'scripts/start.ps1'
           [void][System.Management.Automation.Language.Parser]::ParseFile($launcherPath, [ref]$parseTokens, [ref]$parseErrors)
           if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: '0.11.32'
+      - run: uv sync --frozen --python 3.12
+      - run: uv run pytest tests/test_daily_safety.py -q
   test:
     runs-on: ubuntu-latest
     steps:

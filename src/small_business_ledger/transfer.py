@@ -12,6 +12,7 @@ from .models import (
     MAX_AMOUNT_CENTS,
     MAX_RECORDS,
     ValidationError,
+    payload_digest,
     validate_entry,
     validate_payment,
     validate_text,
@@ -22,7 +23,7 @@ from .store import LedgerError, timestamp
 router = APIRouter(prefix="/api")
 CSV_LIMIT = 2 * 1024 * 1024
 CSV_ROWS = 2000
-FIELDS = [
+LEGACY_FIELDS = [
     "external_id",
     "kind",
     "date",
@@ -34,7 +35,9 @@ FIELDS = [
     "amount",
     "note",
 ]
-ENTRY_COLUMNS = [
+OPTIONAL_FIELDS = ["customer", "supplier", "receivable_due_date", "payable_due_date"]
+FIELDS = LEGACY_FIELDS + OPTIONAL_FIELDS
+LEGACY_ENTRY_COLUMNS = [
     "id",
     "kind",
     "date",
@@ -52,6 +55,8 @@ ENTRY_COLUMNS = [
     "voided_at",
     "void_reason",
 ]
+ENTRY_COLUMNS = LEGACY_ENTRY_COLUMNS + OPTIONAL_FIELDS
+REQUEST_COLUMNS = ["key", "operation", "payload_hash", "record_id"]
 PAYMENT_COLUMNS = [
     "id",
     "kind",
@@ -100,7 +105,7 @@ def _parse_csv(text, existing):
         header = reader.fieldnames or []
         if (
             len(set(header)) != len(header)
-            or not set(FIELDS) <= set(header)
+            or not set(LEGACY_FIELDS) <= set(header)
             or set(header) - set(FIELDS + ["status", "text_encoding"])
         ):
             raise ValueError("表头不匹配，请使用下载的 CSV 模板")
@@ -125,6 +130,12 @@ def _parse_csv(text, existing):
                     k: row[k]
                     for k in ("kind", "date", "description", "category", "note", "external_id")
                 }
+                payload.update(
+                    customer=row.get("customer", ""),
+                    supplier=row.get("supplier", ""),
+                    receivable_due_date=row.get("receivable_due_date") or None,
+                    payable_due_date=row.get("payable_due_date") or None,
+                )
                 if row["kind"] == "sale":
                     if not re.fullmatch(r"[0-9]{1,7}", row["quantity"]):
                         raise ValueError("数量须为整数")
@@ -177,6 +188,12 @@ def commit_csv(store, text):
         if preview["errors"]:
             error = preview["errors"][0]
             raise LedgerError(f"第 {error['row']} 行：{error['message']}")
+        count = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM payments)"
+        ).fetchone()[0]
+        if count + preview["count"] > MAX_RECORDS:
+            raise LedgerError("导入后账本将超过 10,000 条上限，请先导出归档", 409)
+        store.before_write(conn)
         for row in preview["rows"]:
             store.insert_entry(conn, validate_entry(row))
     return {"imported": preview["count"]}
@@ -194,6 +211,7 @@ def export_entries(store):
     rows = []
     for e in store.entries():
         row = {k: _protect(e[k]) for k in ("kind", "date", "description", "category", "note")}
+        row.update({k: _protect(e[k]) for k in OPTIONAL_FIELDS})
         row.update(
             external_id=_protect(e["external_id"] or "entry-" + e["id"]),
             quantity=e["quantity"] if e["kind"] == "sale" else "",
@@ -217,21 +235,63 @@ def export_payments(store):
     return _csv_output(fields, rows)
 
 
+def export_outstanding(store, as_of):
+    report = store.outstanding(as_of)
+    fields = [
+        "as_of",
+        "entry_id",
+        "kind",
+        "date",
+        "description",
+        "category",
+        "counterparty",
+        "due_date",
+        "original",
+        "settled",
+        "outstanding",
+        "overdue_days",
+        "status",
+    ]
+    rows = []
+    for item in report["items"]:
+        row = {key: _protect(item[key]) for key in fields if key in item}
+        row.update(
+            as_of=report["as_of"],
+            original=money(item["original_cents"]),
+            settled=money(item["settled_cents"]),
+            outstanding=money(item["outstanding_cents"]),
+        )
+        rows.append(row)
+    return _csv_output(fields, rows)
+
+
 def make_backup(store):
-    # One read transaction gives a consistent pair of tables, even while writes happen.
+    # One transaction also captures the request mappings for these exact records.
     with store.connect() as conn:
         conn.execute("BEGIN")
-        entries = [dict(row) for row in conn.execute("SELECT * FROM entries ORDER BY date,id")]
-        payments = [dict(row) for row in conn.execute("SELECT * FROM payments ORDER BY date,id")]
-        demo = conn.execute("SELECT value FROM metadata WHERE key='demo'").fetchone()
-    return {
-        "version": 1,
+        return make_backup_from_connection(conn)
+
+
+def make_backup_from_connection(conn):
+    """Read the caller's transaction, including an old schema before migration."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+    version = 2 if set(OPTIONAL_FIELDS) <= columns else 1
+    entries = [dict(row) for row in conn.execute("SELECT * FROM entries ORDER BY date,id")]
+    payments = [dict(row) for row in conn.execute("SELECT * FROM payments ORDER BY date,id")]
+    demo = conn.execute("SELECT value FROM metadata WHERE key='demo'").fetchone()
+    backup = {
+        "version": version,
         "currency": "CNY",
         "demo": bool(demo and demo[0] == "true"),
         "exported_at": timestamp(),
         "entries": entries,
         "payments": payments,
     }
+    if version == 2:
+        backup["write_requests"] = [
+            dict(row) for row in conn.execute("SELECT * FROM write_requests ORDER BY key")
+        ]
+    return backup
 
 
 def _timestamp(value):
@@ -264,16 +324,13 @@ def _cents(value):
     return money(value)
 
 
-def _restore_entry(row):
-    if (
-        not isinstance(row, dict)
-        or not set(ENTRY_COLUMNS) <= set(row)
-        or set(row) - set(ENTRY_COLUMNS + ["received_cents", "paid_cents"])
-    ):
-        raise ValidationError("备份单据字段不完整或包含未知字段")
-    _audit_fields(row)
+def _normalized_entry_payload(row):
+    # Rebuild only creation input; audit history and current settlement totals
+    # never belonged to the original request. The validator recalculates amounts.
     payload = {
-        k: row[k] for k in ("kind", "date", "description", "category", "note", "external_id")
+        k: row[k]
+        for k in ["kind", "date", "description", "category", "note", "external_id"]
+        + OPTIONAL_FIELDS
     }
     if row["kind"] == "sale":
         payload.update(
@@ -283,18 +340,35 @@ def _restore_entry(row):
         )
     else:
         payload["amount"] = _cents(row["amount_cents"])
-    normalized = validate_entry(payload)
+    return validate_entry(payload)
+
+
+def _restore_entry(row, version):
+    columns = LEGACY_ENTRY_COLUMNS if version == 1 else ENTRY_COLUMNS
+    if (
+        not isinstance(row, dict)
+        or not set(columns) <= set(row)
+        or set(row) - set(columns + ["received_cents", "paid_cents"])
+    ):
+        raise ValidationError("备份单据字段不完整或包含未知字段")
+    if version == 1:
+        row = {
+            **row,
+            "customer": "",
+            "supplier": "",
+            "receivable_due_date": None,
+            "payable_due_date": None,
+        }
+    _audit_fields(row)
+    normalized = _normalized_entry_payload(row)
     for key, value in normalized.items():
         if type(row[key]) is not type(value) or row[key] != value:
             raise ValidationError(f"单据字段 {key} 与重新计算的值不一致")
     return {key: row[key] for key in ENTRY_COLUMNS}
 
 
-def _restore_payment(row):
-    if not isinstance(row, dict) or set(row) != set(PAYMENT_COLUMNS):
-        raise ValidationError("备份流水字段不完整或包含未知字段")
-    _audit_fields(row)
-    normalized = validate_payment(
+def _normalized_payment_payload(row):
+    return validate_payment(
         {
             "kind": row["kind"],
             "entry_id": row["entry_id"],
@@ -303,6 +377,13 @@ def _restore_payment(row):
             "note": row["note"],
         }
     )
+
+
+def _restore_payment(row):
+    if not isinstance(row, dict) or set(row) != set(PAYMENT_COLUMNS):
+        raise ValidationError("备份流水字段不完整或包含未知字段")
+    _audit_fields(row)
+    normalized = _normalized_payment_payload(row)
     for key, value in normalized.items():
         if type(row[key]) is not type(value) or row[key] != value:
             raise ValidationError(f"流水字段 {key} 无效")
@@ -310,28 +391,30 @@ def _restore_payment(row):
 
 
 def _validate_backup(backup):
-    if not isinstance(backup, dict) or set(backup) != {
+    if not isinstance(backup, dict):
+        raise ValidationError("备份须为 JSON 对象")
+    if type(backup.get("version")) is not int or backup["version"] not in {1, 2}:
+        raise ValidationError("不支持的备份版本")
+    fields = {
         "version",
         "currency",
         "demo",
         "exported_at",
         "entries",
         "payments",
-    }:
+    }
+    if backup["version"] == 2:
+        fields.add("write_requests")
+    if set(backup) != fields:
         raise ValidationError("备份结构不完整或包含未知字段")
-    if (
-        type(backup["version"]) is not int
-        or backup["version"] != 1
-        or backup["currency"] != "CNY"
-        or type(backup["demo"]) is not bool
-    ):
+    if backup["currency"] != "CNY" or type(backup["demo"]) is not bool:
         raise ValidationError("不支持的备份版本、币种或示例标记")
     _timestamp(backup["exported_at"])
     if not isinstance(backup["entries"], list) or not isinstance(backup["payments"], list):
         raise ValidationError("备份单据与流水须为列表")
     if len(backup["entries"]) + len(backup["payments"]) > MAX_RECORDS:
         raise ValidationError("备份记录不能超过 10,000 条")
-    entries = [_restore_entry(row) for row in backup["entries"]]
+    entries = [_restore_entry(row, backup["version"]) for row in backup["entries"]]
     payments = [_restore_payment(row) for row in backup["payments"]]
     ids = [r["id"] for r in entries + payments]
     if len(ids) != len(set(ids)):
@@ -365,12 +448,54 @@ def _validate_backup(backup):
             paid[key] = paid.get(key, 0) + p["amount_cents"]
             if paid[key] > limit:
                 raise ValidationError("累计收付款超过对应单据金额")
+    validated_requests(backup, entries, payments)
     return entries, payments
+
+
+def validated_requests(backup, entries, payments):
+    """Validate deduplication metadata independently of record financial validation."""
+    if backup["version"] == 1:
+        return []
+    requests = backup.get("write_requests")
+    if not isinstance(requests, list) or len(requests) > len(entries) + len(payments):
+        raise ValidationError("请求去重索引须为列表且不能多于记录数")
+    by_operation = {
+        "entry.create": {row["id"]: row for row in entries},
+        "payment.create": {row["id"]: row for row in payments},
+    }
+    keys, records, validated = set(), set(), []
+    for row in requests:
+        if not isinstance(row, dict) or set(row) != set(REQUEST_COLUMNS):
+            raise ValidationError("请求去重索引字段不完整或包含未知字段")
+        key = validate_uuid(row["key"], "请求编号")
+        record_id = validate_uuid(row["record_id"], "请求关联记录编号")
+        operation, digest = row["operation"], row["payload_hash"]
+        if not isinstance(operation, str) or operation not in by_operation:
+            raise ValidationError("请求去重索引操作类型无效")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValidationError("请求摘要须为 64 位小写十六进制文本")
+        if record_id not in by_operation[operation]:
+            raise ValidationError("请求关联记录缺失或操作类型不符")
+        record = by_operation[operation][record_id]
+        normalized = (
+            _normalized_entry_payload(record)
+            if operation == "entry.create"
+            else _normalized_payment_payload(record)
+        )
+        if digest != payload_digest(normalized):
+            raise ValidationError("请求摘要与关联记录的原始内容不一致")
+        if key in keys or record_id in records:
+            raise ValidationError("请求编号或关联记录重复")
+        keys.add(key)
+        records.add(record_id)
+        validated.append(row.copy())
+    return validated
 
 
 def restore_backup(store, backup):
     try:
         entries, payments = _validate_backup(backup)
+        requests = validated_requests(backup, entries, payments)
     except (ValueError, TypeError, KeyError, OverflowError) as exc:
         raise LedgerError(f"备份校验失败：{exc}") from exc
     with store.connect() as conn:
@@ -379,9 +504,11 @@ def restore_backup(store, backup):
             "SELECT (SELECT COUNT(*) FROM entries)+(SELECT COUNT(*) FROM payments)"
         ).fetchone()[0]:
             raise LedgerError("只能恢复到完全空白的账本，不会覆盖现有记录", 409)
+        store.before_write(conn)
         for table, columns, rows in [
             ("entries", ENTRY_COLUMNS, entries),
             ("payments", PAYMENT_COLUMNS, payments),
+            ("write_requests", REQUEST_COLUMNS, requests),
         ]:
             sql = f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})"
             conn.executemany(sql, [tuple(row[k] for k in columns) for row in rows])
@@ -416,6 +543,11 @@ def payments_download(request: Request):
     return _download(export_payments(request.app.state.store), "ledger-payments.csv")
 
 
+@router.get("/export/outstanding.csv")
+def outstanding_download(request: Request, as_of: str):
+    return _download(export_outstanding(request.app.state.store, as_of), "ledger-outstanding.csv")
+
+
 @router.get("/import/template.csv")
 def template_download():
     return _download(
@@ -436,6 +568,10 @@ def template_download():
                             "8.00",
                             "",
                             "虚构例子，请替换",
+                            "示例客户",
+                            "示例供应商",
+                            "2026-10-15",
+                            "2026-10-20",
                         ],
                     )
                 ),
@@ -453,6 +589,10 @@ def template_download():
                             "",
                             "100.00",
                             "虚构例子，请替换",
+                            "",
+                            "示例出租方",
+                            "",
+                            "2026-10-15",
                         ],
                     )
                 ),

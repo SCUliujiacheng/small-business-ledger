@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ErrorMessage, Field, Modal, useSubmit } from "../components/Forms";
-import { request } from "../lib/api";
+import { useCreateAttempt } from "../lib/useCreateAttempt";
 import {
   formatMoney,
   localDate,
@@ -24,8 +24,13 @@ export function EntryDialog({
     [price, setPrice] = useState(""),
     [cost, setCost] = useState(""),
     [amount, setAmount] = useState(""),
-    [note, setNote] = useState("");
+    [note, setNote] = useState(""),
+    [customer, setCustomer] = useState(""),
+    [supplier, setSupplier] = useState(""),
+    [receivableDue, setReceivableDue] = useState(""),
+    [payableDue, setPayableDue] = useState("");
   const { busy, error, run } = useSubmit();
+  const { uncertain, submit } = useCreateAttempt("/entries");
   let totals: { revenue: number; cost: number } | null = null;
   try {
     if (price && cost) totals = saleTotals(quantity, price, cost);
@@ -38,33 +43,49 @@ export function EntryDialog({
         onSubmit={(event) => {
           event.preventDefault();
           void run(async () => {
+            if (uncertain) {
+              await submit();
+              onSaved();
+              return;
+            }
             if (!validDate(date)) throw new Error("请填写有效的业务发生日期");
             if (!description.trim() || !category.trim())
               throw new Error("请填写项目和分类");
+            for (const due of [
+              payableDue,
+              ...(kind === "sale" ? [receivableDue] : []),
+            ]) {
+              if (due && (!validDate(due) || due < date))
+                throw new Error("到期日须为有效日期，且不能早于业务日期");
+            }
             const common = {
               kind,
               date,
               description: description.trim(),
               category: category.trim(),
               note: note.trim(),
+              supplier: supplier.trim(),
+              payable_due_date: payableDue || null,
             };
             if (kind === "sale") {
               saleTotals(quantity, price, cost);
-              await request("/entries", {
+              await submit({
                 ...common,
+                customer: customer.trim(),
+                receivable_due_date: receivableDue || null,
                 quantity: Number(quantity),
                 unit_price: price.trim(),
                 unit_cost: cost.trim(),
               });
             } else {
               if (parseMoney(amount) <= 0) throw new Error("费用金额须大于零");
-              await request("/entries", { ...common, amount: amount.trim() });
+              await submit({ ...common, amount: amount.trim() });
             }
             onSaved();
           });
         }}
       >
-        <fieldset disabled={busy} className="form-fields">
+        <fieldset disabled={busy || uncertain} className="form-fields">
           <div className="segmented" role="group" aria-label="记录类型">
             {(["sale", "expense"] as const).map((value) => (
               <label key={value} className={kind === value ? "selected" : ""}>
@@ -152,6 +173,38 @@ export function EntryDialog({
                 />
               </div>
             )}
+            {kind === "sale" ? (
+              <>
+                <Field
+                  label="客户（可选）"
+                  maxLength={120}
+                  value={customer}
+                  onChange={(e) => setCustomer(e.target.value)}
+                />
+                <Field
+                  label="收款到期日（可选）"
+                  type="date"
+                  min={date}
+                  max="2100-12-31"
+                  value={receivableDue}
+                  onChange={(e) => setReceivableDue(e.target.value)}
+                />
+              </>
+            ) : null}
+            <Field
+              label="供应商 / 收款方（可选）"
+              maxLength={120}
+              value={supplier}
+              onChange={(e) => setSupplier(e.target.value)}
+            />
+            <Field
+              label="付款到期日（可选）"
+              type="date"
+              min={date}
+              max="2100-12-31"
+              value={payableDue}
+              onChange={(e) => setPayableDue(e.target.value)}
+            />
             <label className="field full">
               备注（可选）
               <textarea
@@ -188,7 +241,7 @@ export function EntryDialog({
             取消
           </button>
           <button className="primary" disabled={busy}>
-            {busy ? "正在保存…" : "保存记录"}
+            {busy ? "正在保存…" : uncertain ? "重试原提交" : "保存记录"}
           </button>
         </div>
       </form>

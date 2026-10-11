@@ -1,6 +1,6 @@
 [project]
 name = "small-business-ledger"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local-first ledger for sales, expenses and cash settlements"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

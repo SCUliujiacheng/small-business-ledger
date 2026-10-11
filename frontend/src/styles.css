@@ -656,6 +656,18 @@ th:last-child {
 .payment-entry {
   max-width: 790px;
 }
+.outstanding-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px 60px;
+}
+.outstanding-totals strong {
+  font-size: 24px;
+  margin-left: 10px;
+}
+.backup-filename {
+  overflow-wrap: anywhere;
+}
 .payment-entry .form-grid {
   grid-template-columns: 1fr 1fr;
 }

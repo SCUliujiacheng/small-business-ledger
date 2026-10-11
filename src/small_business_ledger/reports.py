@@ -5,6 +5,87 @@ from datetime import date
 from .models import ValidationError, validate_date
 
 
+def outstanding(entries, payments, as_of):
+    """Unsettled active obligations using business and payment dates up to the cutoff."""
+    as_of = validate_date(as_of)
+    cutoff = date.fromisoformat(as_of)
+    settled = {}
+    for payment in payments:
+        if payment["voided_at"] or payment["date"] > as_of:
+            continue
+        key = (payment["entry_id"], payment["kind"])
+        settled[key] = settled.get(key, 0) + payment["amount_cents"]
+
+    totals = dict.fromkeys(
+        [
+            "receivable_cents",
+            "payable_cents",
+            "overdue_receivable_cents",
+            "overdue_payable_cents",
+        ],
+        0,
+    )
+    items = []
+    for entry in entries:
+        if entry["voided_at"] or entry["date"] > as_of:
+            continue
+        obligations = (
+            [
+                ("receipt", "revenue_cents", "customer", "receivable_due_date"),
+                ("cost_payment", "cost_cents", "supplier", "payable_due_date"),
+            ]
+            if entry["kind"] == "sale"
+            else [("expense_payment", "amount_cents", "supplier", "payable_due_date")]
+        )
+        for kind, amount_field, counterparty_field, due_field in obligations:
+            original = entry[amount_field]
+            paid = settled.get((entry["id"], kind), 0)
+            balance = original - paid
+            if balance <= 0:
+                continue
+            due = entry.get(due_field)
+            overdue_days = max(0, (cutoff - date.fromisoformat(due)).days) if due else 0
+            status = (
+                "no_due_date"
+                if due is None
+                else "overdue"
+                if due < as_of
+                else "due_today"
+                if due == as_of
+                else "upcoming"
+            )
+            side = "receivable_cents" if kind == "receipt" else "payable_cents"
+            totals[side] += balance
+            if overdue_days:
+                totals["overdue_" + side] += balance
+            items.append(
+                {
+                    "entry_id": entry["id"],
+                    "kind": kind,
+                    "date": entry["date"],
+                    "description": entry["description"],
+                    "category": entry["category"],
+                    "counterparty": entry.get(counterparty_field, ""),
+                    "due_date": due,
+                    "outstanding_cents": balance,
+                    "original_cents": original,
+                    "settled_cents": paid,
+                    "overdue_days": overdue_days,
+                    "status": status,
+                }
+            )
+    items.sort(
+        key=lambda item: (
+            item["due_date"] is None,
+            item["due_date"] or "",
+            item["date"],
+            item["entry_id"],
+            item["kind"],
+        )
+    )
+    return {"as_of": as_of, **totals, "items": items}
+
+
 def summarize(entries, payments, start, end):
     start, end = validate_date(start), validate_date(end)
     days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1

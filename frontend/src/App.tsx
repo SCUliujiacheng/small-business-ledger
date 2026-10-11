@@ -9,11 +9,13 @@ import { Overview } from "./features/Overview";
 import { PaymentsPage } from "./features/PaymentsPage";
 import { PaymentDialog } from "./features/PaymentDialog";
 import { DataPage } from "./features/DataPage";
+import { OutstandingPage } from "./features/OutstandingPage";
 import { VoidDialog } from "./features/VoidDialog";
 import type { VoidTarget } from "./features/VoidDialog";
 const pages = [
   ["overview", "经营概览"],
   ["entries", "销售与费用"],
+  ["outstanding", "欠款清单"],
   ["payments", "收付款"],
   ["data", "导入与备份"],
 ] as const;
@@ -227,6 +229,15 @@ export default function App() {
                     setPaymentTarget({ entryId: entry.id, kind })
                   }
                   onVoid={setVoidTarget}
+                />
+              ) : page === "outstanding" ? (
+                <OutstandingPage
+                  entries={data.entries}
+                  revision={revision}
+                  entriesLoading={loading || !!error}
+                  onPayment={(entry, kind) =>
+                    setPaymentTarget({ entryId: entry.id, kind })
+                  }
                 />
               ) : page === "payments" ? (
                 <PaymentsPage

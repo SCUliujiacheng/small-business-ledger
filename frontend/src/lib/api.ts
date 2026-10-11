@@ -1,7 +1,15 @@
+export class RequestError extends Error {
+  readonly uncertain: boolean;
+  constructor(message: string, uncertain = false) {
+    super(message);
+    this.uncertain = uncertain;
+  }
+}
 export async function request<T>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  requestId?: string,
 ): Promise<T> {
   let response: Response;
   try {
@@ -14,6 +22,7 @@ export async function request<T>(
             headers: {
               "Content-Type": "application/json",
               "X-Ledger-Request": "1",
+              ...(requestId ? { "Idempotency-Key": requestId } : {}),
             },
             body: JSON.stringify(body),
             signal,
@@ -21,12 +30,12 @@ export async function request<T>(
     );
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") throw error;
-    throw new Error("无法连接本机账本服务，请确认服务运行后重试");
+    throw new RequestError("无法连接本机账本服务，请确认服务运行后重试", true);
   }
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = data?.detail;
-    throw new Error(
+    throw new RequestError(
       typeof detail === "string"
         ? detail
         : Array.isArray(detail)
@@ -37,9 +46,10 @@ export async function request<T>(
               )
               .join("；")
           : `请求未完成（${response.status}），请重试`,
+      response.status >= 500,
     );
   }
-  if (data === null) throw new Error("服务返回了无效数据，请重试");
+  if (data === null) throw new RequestError("服务返回了无效数据，请重试", true);
   return data as T;
 }
 export function errorMessage(error: unknown): string {

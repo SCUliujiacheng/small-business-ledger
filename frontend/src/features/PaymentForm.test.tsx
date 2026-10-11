@@ -4,6 +4,45 @@ import { afterEach, expect, it, vi } from "vitest";
 import { sale } from "../test/fixtures";
 import { PaymentForm } from "./PaymentForm";
 afterEach(() => vi.unstubAllGlobals());
+it("收付款响应丢失后仍可按原编号重试，不因已刷新的余额而被本地拦截", async () => {
+  const sent: RequestInit[] = [];
+  let saved = 0;
+  vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+    sent.push(init);
+    if (sent.length === 1) throw new TypeError("response lost");
+    return new Response("{}", { status: 201 });
+  });
+  const user = userEvent.setup();
+  const view = render(
+    <PaymentForm
+      entries={[sale]}
+      initialEntryId={sale.id}
+      onSaved={() => saved++}
+    />,
+  );
+  await user.type(screen.getByLabelText("金额（元）"), "50");
+  await user.click(screen.getByRole("button", { name: "保存流水" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法确认");
+  expect(screen.getByLabelText("金额（元）")).toBeDisabled();
+  view.rerender(
+    <PaymentForm
+      entries={[{ ...sale, received_cents: 20000 }]}
+      initialEntryId={sale.id}
+      onSaved={() => saved++}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "重试原提交" }));
+  await waitFor(() => expect(saved).toBe(1));
+  const key = new Headers(sent[0].headers).get("Idempotency-Key");
+  expect(key).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(new Headers(sent[1].headers).get("Idempotency-Key")).toBe(key);
+  expect(sent[1].body).toBe(sent[0].body);
+  await user.selectOptions(screen.getByLabelText("流水种类"), "capital_in");
+  await user.type(screen.getByLabelText("金额（元）"), "50");
+  await user.click(screen.getByRole("button", { name: "保存流水" }));
+  await waitFor(() => expect(saved).toBe(2));
+  expect(new Headers(sent[2].headers).get("Idempotency-Key")).not.toBe(key);
+});
 it("选择单据不会悄悄改写用户已填写的实际收付日期", async () => {
   const user = userEvent.setup();
   render(<PaymentForm entries={[sale]} onSaved={() => {}} />);

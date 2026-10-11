@@ -9,6 +9,7 @@ data/
 *.db
 *.db-*
 *.sqlite*
+*.backups/
 .env
 .env.*
 !.env.example

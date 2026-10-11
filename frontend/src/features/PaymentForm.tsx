@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ErrorMessage, Field, useSubmit } from "../components/Forms";
-import { request } from "../lib/api";
+import { useCreateAttempt } from "../lib/useCreateAttempt";
 import { formatMoney, localDate, parseMoney, validDate } from "../lib/money";
 import { paymentLabels } from "../lib/types";
 import type { Entry, PaymentKind } from "../lib/types";
@@ -28,6 +28,7 @@ export function PaymentForm({
     [amount, setAmount] = useState(""),
     [note, setNote] = useState("");
   const { busy, error, run } = useSubmit(onBusyChange);
+  const { uncertain, submit } = useCreateAttempt("/payments");
   const linked = kind !== "capital_in" && kind !== "capital_out";
   const eligible = entries.filter(
     (entry) =>
@@ -47,6 +48,13 @@ export function PaymentForm({
       onSubmit={(event) => {
         event.preventDefault();
         void run(async () => {
+          if (uncertain) {
+            await submit();
+            setAmount("");
+            setNote("");
+            onSaved();
+            return;
+          }
           if (!validDate(date)) throw new Error("请填写有效的实际收付日期");
           const cents = parseMoney(amount);
           if (cents <= 0) throw new Error("收付款金额须大于零");
@@ -57,7 +65,7 @@ export function PaymentForm({
             if (cents > remaining)
               throw new Error("金额超过剩余可收或可付金额，请核对后重试");
           }
-          await request("/payments", {
+          await submit({
             kind,
             entry_id: linked ? entryId : null,
             date,
@@ -70,7 +78,7 @@ export function PaymentForm({
         });
       }}
     >
-      <fieldset disabled={busy} className="form-fields">
+      <fieldset disabled={busy || uncertain} className="form-fields">
         <div className="form-grid">
           <label className="field">
             流水种类
@@ -161,7 +169,7 @@ export function PaymentForm({
       <ErrorMessage message={error} />
       <div className="form-actions">
         <button className="primary" disabled={busy}>
-          {busy ? "正在保存…" : "保存流水"}
+          {busy ? "正在保存…" : uncertain ? "重试原提交" : "保存流水"}
         </button>
       </div>
     </form>
