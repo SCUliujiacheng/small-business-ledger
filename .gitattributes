@@ -1,6 +1,7 @@
 * text=auto
 *.sh text eol=lf
 android/gradlew text eol=lf
+licenses/** -text
 *.py text eol=lf
 *.yml text eol=lf
 *.csv text eol=lf

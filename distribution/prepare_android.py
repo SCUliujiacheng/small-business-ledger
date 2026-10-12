@@ -7,8 +7,10 @@ import subprocess
 from pathlib import Path
 
 try:
+    from .collect_licenses import collect_licenses
     from .resource_staging import reset_resources
 except ImportError:
+    from collect_licenses import collect_licenses
     from resource_staging import reset_resources
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +65,7 @@ def main():
         "transfer.py",
     ]:
         shutil.copy2(ROOT / "src/small_business_ledger" / filename, core / filename)
+    collect_licenses(ROOT, args.assets_dir, target="android")
     print(json.dumps({"python": str(args.python_dir), "resources": str(args.assets_dir)}))
 
 
