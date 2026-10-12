@@ -33,12 +33,12 @@ jobs:
         with:
           node-version: '22'
       - run: uv sync --frozen --group build --python 3.12
-      - run: uv run pytest -q
       - name: Build web assets
         shell: bash
         run: |
           if [ -d frontend ]; then cd frontend; npm ci; npm test; npm run build; fi
           if [ -d web ]; then cd web; npm ci; npm test -- --run; npm run build; fi
+      - run: uv run pytest -q
       - name: Build and execute native binary in isolated Unicode directory
         run: uv run --group build python distribution/build_desktop.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
