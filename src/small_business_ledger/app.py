@@ -143,7 +143,7 @@ class LocalOnlyMiddleware:
         await response(scope, receive, send)
 
 
-def create_app(db_path=None):
+def create_app(db_path=None, frontend_dir=None):
     app = FastAPI(title="小本账", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = Store(db_path or os.environ.get("LEDGER_DB_PATH", "data/ledger.db"))
     app.add_middleware(LocalOnlyMiddleware, development=os.environ.get("LEDGER_DEV") == "1")
@@ -220,11 +220,15 @@ def create_app(db_path=None):
             raise LedgerError("示例请求须为空对象")
         return app.state.store.seed_demo()
 
-    from .transfer import router
+    from .transfer_http import router
 
     app.include_router(router)
 
-    dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    dist = (
+        Path(frontend_dir)
+        if frontend_dir
+        else Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    )
 
     @app.get("/{requested_path:path}")
     def frontend(requested_path: str):

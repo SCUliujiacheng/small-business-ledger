@@ -360,7 +360,9 @@ try {
   await page.getByLabel('关联单据').selectOption(sale.id);
   await page.getByLabel('实际收付日期').fill('2026-10-03');
   await page.getByLabel('金额（元）', { exact: true }).fill('600.00');
+  const paymentSaved = page.waitForResponse(response => response.url() === `${base}/api/payments` && response.request().method() === 'POST' && response.status() === 201);
   await page.getByRole('button', { name: '保存流水' }).click();
+  await paymentSaved;
   await page.getByLabel('金额（元）', { exact: true }).waitFor();
   await page.waitForFunction(async () => (await (await fetch('/api/payments')).json()).items.length === 1);
   report = await summary(base);

@@ -3,6 +3,30 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { emptyMeta } from "../test/fixtures";
 import { DataPage } from "./DataPage";
+
+it("手机版显示实际的 16 MiB 备份导入限制", async () => {
+  const marker = document.createElement("meta");
+  marker.name = "ledger-runtime";
+  marker.content = "mobile";
+  document.head.append(marker);
+  try {
+    render(
+      <DataPage
+        meta={{
+          name: "小本账",
+          currency: "CNY",
+          demo: false,
+          entry_count: 0,
+          payment_count: 0,
+        }}
+        onChanged={() => {}}
+      />,
+    );
+    expect(screen.getByText(/手机备份导入上限 16 MiB/)).toBeInTheDocument();
+  } finally {
+    marker.remove();
+  }
+});
 afterEach(() => vi.unstubAllGlobals());
 const backups = {
   directory: "C:\\ledger.db.backups",

@@ -1,0 +1,10 @@
+{
+  "slug": "small-business-ledger",
+  "name": "小本账",
+  "version": "0.3.0",
+  "desktop_module": "distribution.desktop_app",
+  "health_path": "/api/meta",
+  "android_application_id": "org.smallbusinessledger.app",
+  "android_version_code": 30000,
+  "export_paths": ["/api/import/template.csv", "/api/export/entries.csv", "/api/export/payments.csv", "/api/export/outstanding.csv", "/api/backup", "/api/local-backups/"]
+}

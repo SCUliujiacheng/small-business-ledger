@@ -19,6 +19,11 @@ export function DataPage({
   meta: Meta;
   onChanged: () => void;
 }) {
+  const mobile =
+    document
+      .querySelector('meta[name="ledger-runtime"]')
+      ?.getAttribute("content") === "mobile";
+  const backupLimit = mobile ? 16 : 128;
   const [csv, setCsv] = useState(""),
     [fileName, setFileName] = useState(""),
     [preview, setPreview] = useState<ImportPreview | null>(null),
@@ -52,9 +57,9 @@ export function DataPage({
     if (!file) return;
     setReading(true);
     try {
-      if (file.size > (kind === "csv" ? 2 : 128) * 1024 * 1024)
+      if (file.size > (kind === "csv" ? 2 : backupLimit) * 1024 * 1024)
         throw new Error(
-          `${kind === "csv" ? "CSV" : "JSON 备份"}文件不能超过 ${kind === "csv" ? "2" : "128"} MiB`,
+          `${kind === "csv" ? "CSV" : "JSON 备份"}文件不能超过 ${kind === "csv" ? 2 : backupLimit} MiB`,
         );
       const content = await readFile(file);
       if (revision !== fileRevision.current) return;
@@ -261,6 +266,11 @@ export function DataPage({
           <p className="muted">
             只允许恢复到完全空的账本，包括没有作废记录。恢复会保留原编号、流水关联和作废原因。
           </p>
+          {mobile ? (
+            <p className="muted">
+              手机备份导入上限 16 MiB。更大的账本请在桌面版恢复。
+            </p>
+          ) : null}
           {!empty ? (
             <p className="inline-note">当前账本已有记录，不能恢复备份。</p>
           ) : null}

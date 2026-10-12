@@ -5,9 +5,6 @@ import io
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, Response
-
 from .models import (
     MAX_AMOUNT_CENTS,
     MAX_RECORDS,
@@ -20,7 +17,6 @@ from .models import (
 )
 from .store import LedgerError, timestamp
 
-router = APIRouter(prefix="/api")
 CSV_LIMIT = 2 * 1024 * 1024
 CSV_ROWS = 2000
 LEGACY_FIELDS = [
@@ -525,101 +521,51 @@ def _payload(payload, key):
     return payload[key]
 
 
-def _download(content, filename):
-    return Response(
-        content,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+def export_template():
+    return _csv_output(
+        FIELDS,
+        [
+            dict(
+                zip(
+                    FIELDS,
+                    [
+                        "example-sale-001",
+                        "sale",
+                        "2026-10-01",
+                        "帆布袋",
+                        "商品",
+                        "10",
+                        "20.00",
+                        "8.00",
+                        "",
+                        "虚构例子，请替换",
+                        "示例客户",
+                        "示例供应商",
+                        "2026-10-15",
+                        "2026-10-20",
+                    ],
+                )
+            ),
+            dict(
+                zip(
+                    FIELDS,
+                    [
+                        "example-expense-001",
+                        "expense",
+                        "2026-10-02",
+                        "摊位费",
+                        "租金",
+                        "",
+                        "",
+                        "",
+                        "100.00",
+                        "虚构例子，请替换",
+                        "",
+                        "示例出租方",
+                        "",
+                        "2026-10-15",
+                    ],
+                )
+            ),
+        ],
     )
-
-
-@router.get("/export/entries.csv")
-def entries_download(request: Request):
-    return _download(export_entries(request.app.state.store), "ledger-entries.csv")
-
-
-@router.get("/export/payments.csv")
-def payments_download(request: Request):
-    return _download(export_payments(request.app.state.store), "ledger-payments.csv")
-
-
-@router.get("/export/outstanding.csv")
-def outstanding_download(request: Request, as_of: str):
-    return _download(export_outstanding(request.app.state.store, as_of), "ledger-outstanding.csv")
-
-
-@router.get("/import/template.csv")
-def template_download():
-    return _download(
-        _csv_output(
-            FIELDS,
-            [
-                dict(
-                    zip(
-                        FIELDS,
-                        [
-                            "example-sale-001",
-                            "sale",
-                            "2026-10-01",
-                            "帆布袋",
-                            "商品",
-                            "10",
-                            "20.00",
-                            "8.00",
-                            "",
-                            "虚构例子，请替换",
-                            "示例客户",
-                            "示例供应商",
-                            "2026-10-15",
-                            "2026-10-20",
-                        ],
-                    )
-                ),
-                dict(
-                    zip(
-                        FIELDS,
-                        [
-                            "example-expense-001",
-                            "expense",
-                            "2026-10-02",
-                            "摊位费",
-                            "租金",
-                            "",
-                            "",
-                            "",
-                            "100.00",
-                            "虚构例子，请替换",
-                            "",
-                            "示例出租方",
-                            "",
-                            "2026-10-15",
-                        ],
-                    )
-                ),
-            ],
-        ),
-        "ledger-template.csv",
-    )
-
-
-@router.post("/import/preview")
-def preview_endpoint(request: Request, payload: dict):
-    return preview_csv(request.app.state.store, _payload(payload, "csv_text"))
-
-
-@router.post("/import/commit")
-def commit_endpoint(request: Request, payload: dict):
-    return commit_csv(request.app.state.store, _payload(payload, "csv_text"))
-
-
-@router.get("/backup")
-def backup_endpoint(request: Request):
-    return JSONResponse(
-        make_backup(request.app.state.store),
-        headers={"Content-Disposition": 'attachment; filename="ledger-backup.json"'},
-    )
-
-
-@router.post("/restore")
-def restore_endpoint(request: Request, payload: dict):
-    return restore_backup(request.app.state.store, _payload(payload, "backup"))

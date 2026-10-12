@@ -6,6 +6,12 @@
 
 ![小本账经营概览，图中为明确标注的虚构示例](docs/images/overview.png)
 
+## 下载安装
+
+[打开下载页](https://github.com/SCUliujiacheng/small-business-ledger/releases) · [安装、升级和账本位置](docs/downloads.md)
+
+下载版不需要安装开发工具。Windows、Mac（M 系列 / Intel）和 Android 分别提供安装附件；请选 Release 中与你设备对应的文件，不是底部的 Source code。首批为预览版，系统签名提示和已测试范围在下载说明中列出。
+
 ## 先试一笔
 
 25 个帆布袋，单价 48 元，单位直接成本 18 元，另有 200 元摊位费。
