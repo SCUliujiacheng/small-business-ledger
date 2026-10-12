@@ -1,4 +1,8 @@
+import sys
+from pathlib import Path
 from xml.etree.ElementTree import fromstring
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def test_signed_apk_smoke_does_not_accept_blank_webview_or_native_error():
